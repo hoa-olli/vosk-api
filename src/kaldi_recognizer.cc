@@ -44,6 +44,9 @@ KaldiRecognizer::KaldiRecognizer(Model *model, float sample_frequency) : model_(
 
     InitState();
     InitRescoring();
+    
+    // Use default value of Kaldi (silence_weight=1) instead vosk (silence_weight=0.001) because it is better
+    model_->feature_info_.silence_weighting_config.silence_weight = 1;
 }
 
 KaldiRecognizer::KaldiRecognizer(Model *model, float sample_frequency, char const *grammar) : model_(model), spk_model_(0), sample_frequency_(sample_frequency)
@@ -580,6 +583,51 @@ const char *KaldiRecognizer::NbestResult(CompactLattice &clat)
     return StoreReturn(obj.dump());
 }
 
+std::string KaldiRecognizer::LatticeToString(const CompactLattice &clat, const fst::SymbolTable &word_syms) {
+    if (clat.NumStates() == 0) {
+        KALDI_WARN << "Empty lattice.";
+        return "";
+    }
+
+    CompactLattice best_path_clat;
+    CompactLatticeShortestPath(clat, &best_path_clat);
+
+    json::JSON obj;
+    std::vector<int32> words;
+    std::vector<int32> begin_times;
+    std::vector<int32> lengths;
+    CompactLattice::Weight weight;
+
+    CompactLatticeToWordAlignmentWeight(best_path_clat, &words, &begin_times, &lengths, &weight);
+
+    float likelihood = -(weight.Weight().Value1() + weight.Weight().Value2());
+
+    stringstream text;
+    json::JSON entry;
+
+    for (int i = 0; i < words.size(); i++) {
+        json::JSON word;
+        if (words[i] == 0)
+            continue;
+        if (words_) {
+            word["word"] = model_->word_syms_->Find(words[i]);
+            word["start"] = samples_round_start_ / sample_frequency_ + (frame_offset_ + begin_times[i]) * 0.03;
+            word["end"] = samples_round_start_ / sample_frequency_ + (frame_offset_ + begin_times[i] + lengths[i]) * 0.03;
+            entry["result"].append(word);
+        }
+        if (i)
+            text << " ";
+        text << model_->word_syms_->Find(words[i]);
+    }
+
+    entry["text"] = text.str();
+    entry["confidence"]= likelihood;
+    obj["alternatives"].append(entry); 
+
+    return StoreReturn(obj.dump());
+}
+
+
 const char* KaldiRecognizer::GetResult()
 {
     if (decoder_->NumFramesDecoded() == 0) {
@@ -589,43 +637,46 @@ const char* KaldiRecognizer::GetResult()
     kaldi::CompactLattice clat;
     kaldi::CompactLattice rlat;
     decoder_->GetLattice(true, &clat);
+    
+    // Use decoding method same online2-tcp-nnet3-decode-faster of kaldi, because it's better
+    std::string msg = LatticeToString(clat, *(model_->word_syms_));
+    return msg.c_str();
 
-    if (lm_to_subtract_scale_ && carpa_to_add_) {
-        TopSortCompactLatticeIfNeeded(&clat);
-        CompactLattice tlat;
-        fst::ComposeDeterministicOnDemandFst<StdArc> combined_lm(lm_to_subtract_scale_, carpa_to_add_);
-        ComposeCompactLatticeDeterministic(clat, &combined_lm, &tlat);
+    // if (lm_to_subtract_scale_ && carpa_to_add_) {
+    //     TopSortCompactLatticeIfNeeded(&clat);
+    //     CompactLattice tlat;
+    //     fst::ComposeDeterministicOnDemandFst<StdArc> combined_lm(lm_to_subtract_scale_, carpa_to_add_);
+    //     ComposeCompactLatticeDeterministic(clat, &combined_lm, &tlat);
 
-        if (rnnlm_to_add_scale_) {
-             ComposeLatticePrunedOptions compose_opts;
-             compose_opts.lattice_compose_beam = 3.0;
-             compose_opts.max_arcs = 3000;
-             TopSortCompactLatticeIfNeeded(&tlat);
-             fst::ComposeDeterministicOnDemandFst<StdArc> combined_rnnlm(carpa_to_add_scale_, rnnlm_to_add_scale_);
-             ComposeCompactLatticePruned(compose_opts, tlat,
-                                         &combined_rnnlm, &rlat);
-             rnnlm_to_add_->Clear();
-        } else {
-             rlat = tlat;
-        }
+    //     if (rnnlm_to_add_scale_) {
+    //          ComposeLatticePrunedOptions compose_opts;
+    //          compose_opts.lattice_compose_beam = 3.0;
+    //          compose_opts.max_arcs = 3000;
+    //          TopSortCompactLatticeIfNeeded(&tlat);
+    //          fst::ComposeDeterministicOnDemandFst<StdArc> combined_rnnlm(carpa_to_add_scale_, rnnlm_to_add_scale_);
+    //          ComposeCompactLatticePruned(compose_opts, tlat,
+    //                                      &combined_rnnlm, &rlat);
+    //          rnnlm_to_add_->Clear();
+    //     } else {
+    //          rlat = tlat;
+    //     }
 
-        kaldi::Lattice slat;
-        ConvertLattice(rlat, &slat);
-        fst::Invert(&slat);
-        DeterminizeLattice(slat, &rlat);
+    //     kaldi::Lattice slat;
+    //     ConvertLattice(rlat, &slat);
+    //     fst::Invert(&slat);
+    //     DeterminizeLattice(slat, &rlat);
 
-    } else {
-        rlat = clat;
-    }
+    // } else {
+    //     rlat = clat;
+    // }
 
-    fst::ScaleLattice(fst::GraphLatticeScale(0.9), &rlat); // Apply rescoring weight
+    // // fst::ScaleLattice(fst::GraphLatticeScale(0.9), &rlat); // Apply rescoring weight
 
-    if (max_alternatives_ == 0) {
-        return MbrResult(rlat);
-    } else {
-        return NbestResult(rlat);
-    }
-
+    // if (max_alternatives_ == 0) {
+    //     return MbrResult(rlat);
+    // } else {
+    //     return NbestResult(rlat);
+    // }
 }
 
 
@@ -667,7 +718,8 @@ const char* KaldiRecognizer::Result()
     }
     decoder_->FinalizeDecoding();
     state_ = RECOGNIZER_ENDPOINT;
-    return GetResult();
+    GetResult();
+    return last_result_.c_str();
 }
 
 const char* KaldiRecognizer::FinalResult()

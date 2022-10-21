@@ -69,6 +69,7 @@ class KaldiRecognizer {
         const char *StoreReturn(const string &res);
         const char *MbrResult(CompactLattice &clat);
         const char *NbestResult(CompactLattice &clat);
+        std::string LatticeToString(const CompactLattice &clat, const fst::SymbolTable &word_syms);
 
         Model *model_ = nullptr;
         SingleUtteranceNnet3Decoder *decoder_ = nullptr;
