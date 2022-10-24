@@ -30,7 +30,7 @@ __pycache__
 *.egg-info
 python/dist
 python/build
-python/vosk/*.so
+# python/vosk/*.so
 python/test/db
 python/test/hyp
 python/test/model
@@ -48,7 +48,7 @@ java/demo/build
 
 # CSharp
 *.dll
-*.so
+# *.so
 *.dylib
 *.nupkg
 csharp/demo/model
